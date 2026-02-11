@@ -1401,6 +1401,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
     ((ConfigOptionBool,               reduce_crossing_wall))
+    ((ConfigOptionBool,               prefer_infill_travel))
     ((ConfigOptionFloatOrPercent,     max_travel_detour_distance))
     ((ConfigOptionPoints,             printable_area))
     ((ConfigOptionPointsGroups,       extruder_printable_area))

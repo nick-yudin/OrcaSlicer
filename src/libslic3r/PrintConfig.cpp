@@ -852,6 +852,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(INITIAL_REDUCE_CROSSING_WALL));
 
+    def = this->add("prefer_infill_travel", coBool);
+    def->label = L("Prefer traveling through infill");
+    def->category = L("Quality");
+    def->tooltip = L("When enabled together with 'Avoid crossing walls', travel moves will preferentially "
+                     "route through sparse infill regions rather than near outer walls. "
+                     "This reduces visible ooze marks on the surface at the cost of potentially longer travel paths. "
+                     "Recommended for materials with heavy oozing (e.g. foaming TPU).");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("max_travel_detour_distance", coFloatOrPercent);
     def->label = L("Avoid crossing walls - Max detour length");
     def->category = L("Quality");
