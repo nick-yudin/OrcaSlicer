@@ -1298,7 +1298,11 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCode &gcodegen, const Point &
     const ExPolygons               &lslices          = gcodegen.layer()->lslices;
     const std::vector<BoundingBox> &lslices_bboxes   = gcodegen.layer()->lslices_bboxes;
     bool                            is_support_layer = (dynamic_cast<const SupportLayer *>(gcodegen.layer()) != nullptr);
-    if (!use_external && (is_support_layer || (!m_lslices_offset.empty() && !any_expolygon_contains(m_lslices_offset, m_lslices_offset_bboxes, m_grid_lslice, travel)))) {
+    // When prefer_infill_travel is enabled, force all internal travels through avoid-crossing
+    // logic so they get routed through the deeply-inset boundary (infill zone).
+    // Without this, travels fully inside the model skip avoid-crossing entirely.
+    bool                            force_avoid      = gcodegen.config().prefer_infill_travel.value;
+    if (!use_external && (force_avoid || is_support_layer || (!m_lslices_offset.empty() && !any_expolygon_contains(m_lslices_offset, m_lslices_offset_bboxes, m_grid_lslice, travel)))) {
         // Initialize m_internal only when it is necessary.
         if (m_internal.boundaries.empty()) {
             const float ps = get_perimeter_spacing(*gcodegen.layer());
