@@ -1134,66 +1134,54 @@ static ExPolygons get_boundary(const Layer &layer, float perimeter_spacing)
 }
 
 // Called by AvoidCrossingPerimeters::travel_to() when prefer_infill_travel is enabled.
-// Constructs a travel boundary restricted to sparse infill regions so the nozzle
-// avoids wiping ooze onto outer walls during travel moves.
-// Falls back to get_boundary() when the infill region is empty or too small.
-static ExPolygons get_boundary_infill_aware(const Layer &layer, float perimeter_spacing)
+// Like get_boundary() but with a deeper inset that pushes the travel boundary past
+// all wall loops into the infill zone. When the travel line crosses this deeply-inset
+// boundary, the detour follows the boundary edge which is now deep inside the part,
+// keeping the nozzle away from outer walls and preventing ooze marks.
+// Falls back to get_boundary() when the extra inset collapses the boundary.
+static ExPolygons get_boundary_infill_aware(const Layer &layer, float perimeter_spacing, int wall_loops)
 {
     const float perimeter_offset = perimeter_spacing / 2.f;
+    auto const *support_layer    = dynamic_cast<const SupportLayer *>(&layer);
 
-    // Collect sparse infill (stInternal) regions from all layer regions.
-    ExPolygons infill_zones;
-    for (const LayerRegion *layer_region : layer.regions()) {
-        // Collect stInternal surfaces (sparse infill only, not solid/bridge/void).
-        ExPolygons sparse_surfaces;
-        for (const Surface &surface : layer_region->fill_surfaces.surfaces)
-            if (surface.surface_type == stInternal)
-                sparse_surfaces.emplace_back(surface.expolygon);
+    // Standard get_boundary() uses 1.5 * perimeter_spacing as inset.
+    // We add wall_loops * perimeter_spacing to push past all perimeter walls.
+    // Minimum extra inset of 2 perimeter widths even if wall_loops is 0/1.
+    const float extra_inset = std::max(2.f, (float)wall_loops) * perimeter_spacing;
+    const float total_inset = 1.5f * perimeter_spacing + extra_inset;
 
-        if (sparse_surfaces.empty())
-            continue;
-
-        // If fill_no_overlap_expolygons is available, intersect with it
-        // for a more precise infill boundary that excludes perimeter overlap.
-        if (!layer_region->fill_no_overlap_expolygons.empty()) {
-            sparse_surfaces = union_ex(sparse_surfaces);
-            ExPolygons precise = intersection_ex(
-                layer_region->fill_no_overlap_expolygons, sparse_surfaces);
-            if (!precise.empty())
-                append(infill_zones, std::move(precise));
-            else
-                append(infill_zones, std::move(sparse_surfaces));
-        } else {
-            append(infill_zones, std::move(sparse_surfaces));
-        }
+    ExPolygons boundary = union_ex(inner_offset(layer.lslices, total_inset));
+    if (support_layer) {
+#ifdef INCLUDE_SUPPORTS_IN_BOUNDARY
+        append(boundary, inner_offset(support_layer->support_islands, total_inset));
+#endif
+        auto *layer_below = layer.object()->get_first_layer_bellow_printz(layer.print_z, EPSILON);
+        if (layer_below)
+            append(boundary, inner_offset(layer_below->lslices, total_inset));
+        boundary = union_ex(boundary);
     }
 
-    infill_zones = union_ex(infill_zones);
+    // Collect all top layers that will not be crossed (same as get_boundary).
+    size_t polygons_count = 0;
+    for (const LayerRegion *layer_region : layer.regions())
+        for (const Surface &surface : layer_region->fill_surfaces.surfaces)
+            if (surface.is_top()) ++polygons_count;
 
-    // Fallback: no sparse infill on this layer (100% solid, support layer, etc.)
-    if (infill_zones.empty())
+    if (polygons_count > 0) {
+        ExPolygons top_layer_polygons;
+        top_layer_polygons.reserve(polygons_count);
+        for (const LayerRegion *layer_region : layer.regions())
+            for (const Surface &surface : layer_region->fill_surfaces.surfaces)
+                if (surface.is_top()) top_layer_polygons.emplace_back(surface.expolygon);
+        top_layer_polygons = union_ex(top_layer_polygons);
+        boundary = diff_ex(boundary, offset_ex(top_layer_polygons, -1.2f * perimeter_offset));
+    }
+
+    // If the extra inset collapsed the boundary (thin parts), fall back to original.
+    if (boundary.empty())
         return get_boundary(layer, perimeter_spacing);
 
-    // Expand infill zones slightly to give the path planner routing margin.
-    ExPolygons expanded_infill = offset_ex(infill_zones, perimeter_offset);
-
-    // Intersect with the original boundary so we never route outside the part.
-    ExPolygons original_boundary = get_boundary(layer, perimeter_spacing);
-    ExPolygons infill_boundary = intersection_ex(expanded_infill, original_boundary);
-
-    // Fallback: infill boundary empty after intersection.
-    if (infill_boundary.empty())
-        return original_boundary;
-
-    // Fallback: if infill boundary is too small (< 5% of original area),
-    // it would produce fragmented paths. Use original boundary instead.
-    double infill_area = 0., original_area = 0.;
-    for (const auto &ep : infill_boundary)   infill_area   += std::abs(ep.area());
-    for (const auto &ep : original_boundary) original_area += std::abs(ep.area());
-    if (original_area > 0. && (infill_area / original_area) < 0.05)
-        return original_boundary;
-
-    return infill_boundary;
+    return boundary;
 }
 
 // called by AvoidCrossingPerimeters::travel_to()
@@ -1315,7 +1303,7 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCode &gcodegen, const Point &
         if (m_internal.boundaries.empty()) {
             const float ps = get_perimeter_spacing(*gcodegen.layer());
             ExPolygons boundary = gcodegen.config().prefer_infill_travel
-                ? get_boundary_infill_aware(*gcodegen.layer(), ps)
+                ? get_boundary_infill_aware(*gcodegen.layer(), ps, gcodegen.config().wall_loops.value)
                 : get_boundary(*gcodegen.layer(), ps);
             init_boundary(&m_internal, to_polygons(boundary), {start, end});
         } else if (!(m_internal.bbox.contains(startf) && m_internal.bbox.contains(endf))) {
@@ -1323,7 +1311,7 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCode &gcodegen, const Point &
             m_internal.clear();
             const float ps = get_perimeter_spacing(*gcodegen.layer());
             ExPolygons boundary = gcodegen.config().prefer_infill_travel
-                ? get_boundary_infill_aware(*gcodegen.layer(), ps)
+                ? get_boundary_infill_aware(*gcodegen.layer(), ps, gcodegen.config().wall_loops.value)
                 : get_boundary(*gcodegen.layer(), ps);
             init_boundary(&m_internal, to_polygons(boundary), {start, end});
         }
